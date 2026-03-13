@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import Navbar from '../components/Navbar'
@@ -74,6 +74,7 @@ function ImageCarousel({ urls }: { urls: string[] }) {
         src={urls[index]}
         alt=""
         className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+        draggable={false}
       />
 
       {/* Counter badge — visible on hover */}
@@ -116,6 +117,14 @@ export default function ListingsPage() {
   const [error, setError]       = useState('')
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
+  // Selection state
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [deletingSelected, setDeletingSelected] = useState(false)
+  const isDraggingRef    = useRef(false)
+  const dragStartIdRef   = useRef<string | null>(null)
+  const wasDragSelectRef = useRef(false)
+  const dragModeRef      = useRef<'select' | 'deselect'>('select')
+
   useEffect(() => {
     async function fetchListings() {
       const { data, error } = await supabase
@@ -134,6 +143,74 @@ export default function ListingsPage() {
     fetchListings()
   }, [])
 
+  // End drag on mouseup anywhere
+  useEffect(() => {
+    const onMouseUp = () => { isDraggingRef.current = false }
+    window.addEventListener('mouseup', onMouseUp)
+    return () => window.removeEventListener('mouseup', onMouseUp)
+  }, [])
+
+  const handleCardMouseDown = (id: string, e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest('button')) return
+    e.preventDefault() // prevent image drag / text selection
+    isDraggingRef.current = true
+    dragStartIdRef.current = id
+    wasDragSelectRef.current = false
+    dragModeRef.current = selectedIds.has(id) ? 'deselect' : 'select'
+  }
+
+  const handleCardMouseEnter = (id: string) => {
+    if (!isDraggingRef.current || dragStartIdRef.current === null) return
+    if (!wasDragSelectRef.current) {
+      // First other card entered — activate drag and include the origin card
+      wasDragSelectRef.current = true
+      if (dragModeRef.current === 'select') {
+        setSelectedIds(prev => new Set([...prev, dragStartIdRef.current!, id]))
+      } else {
+        setSelectedIds(prev => {
+          const next = new Set(prev)
+          next.delete(dragStartIdRef.current!)
+          next.delete(id)
+          return next
+        })
+      }
+    } else {
+      if (dragModeRef.current === 'select') {
+        setSelectedIds(prev => {
+          if (prev.has(id)) return prev
+          return new Set([...prev, id])
+        })
+      } else {
+        setSelectedIds(prev => {
+          if (!prev.has(id)) return prev
+          const next = new Set(prev)
+          next.delete(id)
+          return next
+        })
+      }
+    }
+  }
+
+  const handleCardClick = (listing: Listing, e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest('button')) return
+    // If a drag-select just finished, swallow the click
+    if (wasDragSelectRef.current) {
+      wasDragSelectRef.current = false
+      return
+    }
+    // In selection mode, clicks toggle individual cards
+    if (selectedIds.size > 0) {
+      setSelectedIds(prev => {
+        const next = new Set(prev)
+        if (next.has(listing.id)) next.delete(listing.id)
+        else next.add(listing.id)
+        return next
+      })
+      return
+    }
+    navigate(`/listings/${listing.id}/edit`)
+  }
+
   const handleDelete = async (listing: Listing, e: React.MouseEvent) => {
     e.stopPropagation()
     if (deletingId) return
@@ -144,6 +221,21 @@ export default function ListingsPage() {
     await supabase.from('listings').delete().eq('id', listing.id)
     setListings(prev => prev.filter(l => l.id !== listing.id))
     setDeletingId(null)
+  }
+
+  const handleDeleteSelected = async () => {
+    if (deletingSelected || selectedIds.size === 0) return
+    setDeletingSelected(true)
+    const toDelete = listings.filter(l => selectedIds.has(l.id))
+    for (const listing of toDelete) {
+      const paths = listing.listing_images.map(img => img.storage_path)
+      if (paths.length > 0) await supabase.storage.from('listing-images').remove(paths)
+      await supabase.from('listing_images').delete().eq('listing_id', listing.id)
+      await supabase.from('listings').delete().eq('id', listing.id)
+    }
+    setListings(prev => prev.filter(l => !selectedIds.has(l.id)))
+    setSelectedIds(new Set())
+    setDeletingSelected(false)
   }
 
   return (
@@ -160,15 +252,34 @@ export default function ListingsPage() {
               {loading ? 'Loading…' : `${listings.length} item${listings.length !== 1 ? 's' : ''}`}
             </p>
           </div>
-          <button
-            onClick={() => navigate('/listings/create')}
-            className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold px-4 py-2.5 rounded-xl transition-colors shadow-sm"
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
-            New Listing
-          </button>
+          <div className="flex items-center gap-3">
+            {selectedIds.size > 0 && (
+              <button
+                onClick={handleDeleteSelected}
+                disabled={deletingSelected}
+                className="flex items-center gap-2 bg-red-500 hover:bg-red-600 disabled:bg-red-300 text-white text-sm font-semibold px-4 py-2.5 rounded-xl transition-colors shadow-sm"
+              >
+                {deletingSelected ? (
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                      d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                )}
+                Delete {selectedIds.size} selected
+              </button>
+            )}
+            <button
+              onClick={() => navigate('/listings/create')}
+              className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold px-4 py-2.5 rounded-xl transition-colors shadow-sm"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+              New Listing
+            </button>
+          </div>
         </div>
 
         {/* Error */}
@@ -216,15 +327,37 @@ export default function ListingsPage() {
 
         {/* Grid */}
         {!loading && listings.length > 0 && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5 select-none">
             {listings.map(listing => {
               const urls = sortedUrls(listing.listing_images)
+              const isSelected = selectedIds.has(listing.id)
               return (
                 <div
                   key={listing.id}
-                  onClick={() => navigate(`/listings/${listing.id}/edit`)}
-                  className="relative bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all cursor-pointer group"
+                  onMouseDown={e => handleCardMouseDown(listing.id, e)}
+                  onMouseEnter={() => handleCardMouseEnter(listing.id)}
+                  onClick={e => handleCardClick(listing, e)}
+                  className={`relative bg-white rounded-2xl border overflow-hidden shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all cursor-pointer group
+                    ${isSelected ? 'border-blue-500 ring-2 ring-blue-400/40' : 'border-gray-200'}`}
                 >
+                  {/* Selection overlay */}
+                  {isSelected && (
+                    <div className="absolute inset-0 bg-blue-500/5 pointer-events-none z-10 rounded-2xl" />
+                  )}
+
+                  {/* Checkbox indicator */}
+                  <div className={`absolute top-2 left-2 w-6 h-6 rounded-full border-2 z-20 flex items-center justify-center transition-all duration-150
+                    ${isSelected
+                      ? 'bg-blue-500 border-blue-500'
+                      : 'bg-white/80 border-gray-300 opacity-0 group-hover:opacity-100'}`}
+                  >
+                    {isSelected && (
+                      <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                      </svg>
+                    )}
+                  </div>
+
                   {/* Photo carousel */}
                   <div className="relative aspect-square bg-gray-100 overflow-hidden">
                     <ImageCarousel urls={urls} />
@@ -256,21 +389,23 @@ export default function ListingsPage() {
                     </p>
                   </div>
 
-                  {/* Delete button — appears on hover */}
-                  <button
-                    onClick={e => handleDelete(listing, e)}
-                    disabled={deletingId === listing.id}
-                    className="absolute bottom-3 right-3 w-8 h-8 bg-red-500 hover:bg-red-600 disabled:bg-red-300 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-md"
-                  >
-                    {deletingId === listing.id ? (
-                      <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                    ) : (
-                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                          d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                      </svg>
-                    )}
-                  </button>
+                  {/* Delete button — hidden in selection mode */}
+                  {selectedIds.size === 0 && (
+                    <button
+                      onClick={e => handleDelete(listing, e)}
+                      disabled={deletingId === listing.id}
+                      className="absolute bottom-3 right-3 w-8 h-8 bg-red-500 hover:bg-red-600 disabled:bg-red-300 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-md"
+                    >
+                      {deletingId === listing.id ? (
+                        <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      ) : (
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                            d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      )}
+                    </button>
+                  )}
                 </div>
               )
             })}
